@@ -1,0 +1,249 @@
+RÉSEAUX D'OPÉRATEURS - TP2 - 02/04/18
+________________________________________________
+
+-> conf IP + loopback + OSPF
+-> activer MPLS sur chaque lien
+-> ex2 ECMP, ex3 CSPF RSVP-TE
+
+
+---------
+TOPOLOGIE
+---------
+http://www.frameip.com/mpls-cisco/
+
+** Interfaces **
+FastEthernet (100 Mbps) R5-R6-R7
+GigabitEthernet (1000 Mbps) ailleurs
+Loopback 0 10.0.x.x/32
+
+* Sous-réseau entre Rx et Ry :	10.0.xy.0/24	(@IP .x 	.y)
+(avec x < y)				
+
+** R5 (par exemple) **
+#int g0/0
+ip addr 10.0.15.5 255.255.255.0
+no shutdown
+
+#int g1/0
+ip addr 10.0.25.5 255.255.255.0
+no shutdown
+
+#int f2/0
+ip addr 10.0.56.5 255.255.255.0
+no shutdown
+
+#int loopback 0
+ip addr 10.0.5.5 255.255.255.255
+no shutdown
+
+#router ospf 1
+network 10.0.15.0 0.0.0.255 area 0
+network 10.0.25.0 0.0.0.255 area 0
+network 10.0.56.0 0.0.0.255 area 0
+network 10.0.5.0 0.0.0.255 area 0
+
+
+-------------------
+BASIC CONFIGURATION
+-------------------
+https://www.cisco.com/c/en/us/td/docs/ios-xml/ios/mp_basic/configuration/xe-3s/mp-basic-xe-3s-book/mp-mpls-cisco-rtrs.html
+https://www.cisco.com/c/en/us/support/docs/multiprotocol-label-switching-mpls/mpls/13736-mplsospf.html
+https://www.cisco.com/c/en/us/support/docs/multiprotocol-label-switching-mpls/mpls/4649-mpls-faq-4649.html#anc5
+
+Q2.
+Sur chaque interface (sauf loopback) : #mpls ip
+
+#show mpls interfaces (detail)					-> LDP ok Tunnel no
+#show mpls forwarding-table (10.10.10.4 32 detail)
+#show mpls ldp bindings
+#show ip cef (10.10.10.4) detail				-> check CEF (tags swapped correctly)
+
+Plusieurs fois le même préfixe car plusieurs chemins pour y aller (OSPF)
+Local : ingoing (vient de...), outgoing (met ce label, le local du suivant ie. le routeur suivant)
+
+
+Q3.
+R3-4-6 sont les routeurs upstreams (R7 est le downstream)
+Les tables affichent Pop tag pour 10.0.7.7
+Ping :
+1->7 : R1-2-6-7
+7->7 : R7-6-2-1
+
+Wireshark : ping R1 vers R7 puis R7 vers R1 (ping vers loopback)
+cf. reply pour déterminer vrai chemin
+
+
+Q4.
+LSP = Label-switched path (slide 15)
+Path = [ Ingress router (LER (label edge router)) --> LSRs (label switch routers) --> Egress router (LER) ]
+
+LSP merging = multi-point to point LSPs (slide 35)
+
+Exemple : 2 entrées différentes + même destination
+R6 vers R1 et R3 vers R1 mergent en R2
+Même tag utilisé
+
+
+Q5.
+show mpls ldp discovery ?
+
+
+
+-------------
+SIGNALIZATION
+-------------
+
+Q1.
+** R6 **
+#int loopback 2
+ip addr 10.0.6.66 255.255.255.255
+no shutdown
+(pas besoin OSPF, déjà config)
+
+Wireshark
+ |_ OSPF LS Update + LS ACK (partout)
+ |_ LDP Label Mapping Message (partout)
+ |_ LDP Address Message Label Mapping Message (liens autour de R6)
+ http://www.mplsvpn.info/2010/06/how-does-label-distribution-protocolldp.html
+
+Q2.
+ECMP déjà par défaut
+traceroute 1-6 + table OSPF + table labels
+pour déduire la topo (où y a des liens)
+
+
+Q3.
+** R2 **
+#int g3/0
+shutdown
+
+Wireshark
+ |_ OSPF LS Update + LS ACK (partout)
+ |_ LDP Label Mapping Message (partout)
+ |_ LDP Address Message Label Mapping Message (liens autour de R6)
+
+
+-------------------
+TRAFFIC ENGINEERING
+-------------------
+
+Q1.
+CSPF = route la plus courte (respectant la bande passante demandée) (cf. slide 54)
+OSPF-TE = annoncer ceux qui est dispo
+RSVP-TE = réservation des ressources le long du chemin
+
+Réserver 3 tunnels vers R6 loopback 2 (dont 1 fail)
+On considère "sous-réseau" R1-2-5-6
+avec réservation GE = 10000 kbps et FE = 1000 kbps
+
+** R1-2-5-6 **							(cf. slide 96)
+#mpls traffic-eng tunnels				(activer les tunnels)
+
+#router ospf 1							(activer OSPF-TE)
+mpls traffic-eng router-id Loopback0 	(Loopback2 sur R6)
+mpls traffic-eng area 0
+
+#int gx/x
+mpls traffic-eng tunnels
+ip rsvp bandwidth 10000 10000			(<total> <max_par_résa> en kbps)
+
+#int fx/x
+mpls traffic-eng tunnels
+ip rsvp bandwidth 1000 1000
+
+
+** R1 **						(chemin 1-2-6)
+#int tunnel 0
+ip unnumbered Loopback0
+tunnel destination 10.0.6.66
+tunnel mode mpls traffic-eng
+tunnel mpls traffic-eng autoroute announce
+tunnel mpls traffic-eng priority 1 1
+tunnel mpls traffic-eng bandwidth 9900
+tunnel mpls traffic-eng path-option 1 dynamic
+no routing dynamic
+
+#int tunnel 1					(chemin 1-5-6)
+[...]
+tunnel mpls traffic-eng priority 2 2
+tunnel mpls traffic-eng bandwidth 500
+
+#int tunnel 2					(fail... rien ne se passe)
+[...]
+tunnel mpls traffic-eng priority 3 3
+tunnel mpls traffic-eng bandwidth 1000
+
+
+Q2.
+On considère même "sous-réseau" Q1
+Tunnel de R1 à L2 R6
+
+** R1 **
+#int tunnel 0
+no tunnel mpls traffic-eng priority 1 1
+tunnel mpls traffic-eng priority 2 2
+
+#int tunnel 1
+no tunnel mpls traffic-eng priority 2 2
+no tunnel mpls traffic-eng bandwidth 500
+tunnel mpls traffic-eng bandwidth 8000
+tunnel mpls traffic-eng priority 1 1
+
+#no int tunnel 2
+
+T1 préempte T0
+
+
+** Vérifications & Wireshark **
+#show ip rsvp
+#show ip rsvp reservation
+#show mpls traffic-eng tunnels
+
+OSPF : LS UP et ACK (partout)
+RSVP : tunnel ID 	(uniquement le chemin choisi)
+	|_ RESV Message (flowspec)
+	|_ PATH Message
+rien ne se passe si fail ?
+
+
+--------------------
+SEVERAL TUNNEL TYPES 
+--------------------
+
+Q1. Pas trouvé de commande pour chemin explicite donc on désactive annonces OSPF
+** R1 **
+#router ospf 1
+no network 10.0.12.0 0.0.0.255 area 0 (etc.)
+
+** R6-3-4-7 **							(tous les routeurs)
+#mpls traffic-eng tunnels
+
+#router ospf 1
+mpls traffic-eng router-id Loopback0	(pour R6 aussi)
+mpls traffic-eng area 0
+
+#int gx/x
+mpls traffic-eng tunnels
+ip rsvp bandwidth 10000 10000
+
+#int fx/x
+mpls traffic-eng tunnels
+ip rsvp bandwidth 1000 1000
+
+** R1 **
+#int tunnel 0
+ip unnumbered Loopback0
+tunnel destination 10.0.4.4
+tunnel mode mpls traffic-eng
+tunnel mpls traffic-eng autoroute announce
+tunnel mpls traffic-eng priority 1 1
+tunnel mpls traffic-eng bandwidth 1000
+tunnel mpls traffic-eng path-option 1 dynamic
+no routing dynamic
+
+#show mpls traffic-eng tunnels
+
+Q2.
+http://packetlife.net/blog/2008/dec/22/disabling-mpls-ttl-propagation/
+
+Q3.
